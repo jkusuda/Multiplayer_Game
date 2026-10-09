@@ -1,10 +1,7 @@
-# Game backend
+# Multiplayer Game Backend
 
 A Go server for everything outside a match: rooms, run results, the leaderboard.
 Live gameplay does not go through this server. Players sync with each other inside Unity.
-
-This repo starts as boilerplate. It connects to a database, runs migrations and answers
-one request, `GET /healthz`. Everything else is yours to design and build.
 
 ## Run it
 
@@ -51,8 +48,6 @@ unity-client/           C# files to copy into the Unity project
 
 ## What to build
 
-A starting list. Change it as the game needs.
-
 | The game needs to | Called by | When |
 | --- | --- | --- |
 | Open a room and get a short code to share | Host | Before a run |
@@ -69,10 +64,3 @@ A starting list. Change it as the game needs.
 4. Add a handler in `internal/api` and register its route in `api.go`.
 5. Add a test in `internal/api/api_test.go`.
 6. Add the matching method to `unity-client/BackendClient.cs`.
-
-## Questions to settle as you build
-
-- There are no accounts. How does the server know who a player is?
-- Two players join the last free seat at the same moment. What stops both getting in?
-- The host's "save run" request times out and the game sends it again. How do you avoid two copies?
-- Unity's `JsonUtility` cannot read a bare JSON list or nested dictionaries. What shape should replies have?
