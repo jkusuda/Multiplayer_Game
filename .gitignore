@@ -1,0 +1,9 @@
+# Built programs
+/server
+*.exe
+
+# Local settings and editor files
+.env
+.idea/
+.vscode/
+.DS_Store
