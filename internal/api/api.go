@@ -39,6 +39,7 @@ func New(st *store.Store, log *slog.Logger) http.Handler {
 	//
 	//	mux.HandleFunc("POST /rooms", a.createRoom)
 	//	mux.HandleFunc("POST /rooms/{code}/join", a.joinRoom)
+	mux.HandleFunc("POST /rooms", a.createRoom)
 
 	return a.logRequests(mux)
 }

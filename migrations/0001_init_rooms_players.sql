@@ -1,12 +1,12 @@
 CREATE TABLE players (
-    id INT PRIMARY KEY,
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     display_name VARCHAR(50),
     created_at TIMESTAMPTZ
 );
 
 CREATE TABLE rooms (
-    id INT PRIMARY KEY,
-    code VARCHAR(50),
+    id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    code VARCHAR(50) NOT NULL UNIQUE,
     host_player_id INT,
     FOREIGN KEY (host_player_id) REFERENCES players(id),
     created_at TIMESTAMPTZ,
