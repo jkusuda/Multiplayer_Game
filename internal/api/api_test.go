@@ -21,7 +21,12 @@ import (
 
 // newServer starts the real API against a real Postgres. Each test gets its
 // own empty schema, so tests never see each other's rows or your local data.
-func newServer(t *testing.T) *httptest.Server {
+type testServer struct {
+	*httptest.Server
+	hostPlayerID int64
+}
+
+func newServer(t *testing.T) *testServer {
 	t.Helper()
 	base := os.Getenv("TEST_DATABASE_URL")
 	if base == "" {
@@ -62,9 +67,17 @@ func newServer(t *testing.T) *httptest.Server {
 		t.Fatal(err)
 	}
 
+	var hostPlayerID int64
+	if err := admin.QueryRow(
+		`INSERT INTO ` + `"` + schema + `".players (display_name, created_at)
+		 VALUES ('Test Host', now()) RETURNING id`,
+	).Scan(&hostPlayerID); err != nil {
+		t.Fatal(err)
+	}
+
 	srv := httptest.NewServer(api.New(st, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	t.Cleanup(srv.Close)
-	return srv
+	return &testServer{Server: srv, hostPlayerID: hostPlayerID}
 }
 
 // call sends a request (with body as JSON, if not nil), decodes the JSON reply
@@ -94,7 +107,7 @@ func TestHealth(t *testing.T) {
 	srv := newServer(t)
 
 	var reply map[string]string
-	status := call(t, srv, "GET", "/healthz", nil, &reply)
+	status := call(t, srv.Server, "GET", "/healthz", nil, &reply)
 
 	if status != http.StatusOK || reply["status"] != "ok" {
 		t.Fatalf("status %d, reply %v", status, reply)
@@ -102,3 +115,24 @@ func TestHealth(t *testing.T) {
 }
 
 // TODO: your tests. Copy TestHealth: start a server, call an endpoint, check the reply.
+func TestCreateRoom(t *testing.T) {
+	srv := newServer(t)
+
+	var reply struct {
+		ID           int64  `json:"id"`
+		Code         string `json:"code"`
+		HostPlayerID int64  `json:"host_player_id"`
+		Status       string `json:"status"`
+	}
+	status := call(t, srv.Server, "POST", "/rooms", map[string]int64{
+		"host_player_id": srv.hostPlayerID,
+	}, &reply)
+	t.Logf("POST /rooms returned status %d and body: %+v", status, reply)
+
+	if status != http.StatusCreated {
+		t.Fatalf("status %d, reply %v", status, reply)
+	}
+	if reply.ID <= 0 || reply.Code == "" || reply.HostPlayerID != srv.hostPlayerID || reply.Status != "waiting" {
+		t.Fatalf("unexpected room reply: %+v", reply)
+	}
+}
