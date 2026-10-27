@@ -1,10 +1,5 @@
-// Command server starts the game backend.
-//
-// Settings come from environment variables so the same program runs on a
-// laptop and on a host without code changes:
-//
-//	PORT          port to listen on (default 8080)
-//	DATABASE_URL  Postgres connection string (default matches docker-compose.yml)
+// Command server starts the game backend. It reads PORT (default 8080) and
+// DATABASE_URL (default matches docker-compose.yml) from the environment.
 package main
 
 import (
@@ -21,13 +16,13 @@ import (
 	"backend/internal/store"
 )
 
+// main connects to Postgres, runs migrations, and serves HTTP until Ctrl+C.
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	port := envOr("PORT", "8080")
 	dbURL := envOr("DATABASE_URL", "postgres://game:game@localhost:5432/game?sslmode=disable")
 
-	// ctx is cancelled when you press Ctrl+C or the host asks the server to stop.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -61,13 +56,13 @@ func main() {
 
 	<-ctx.Done()
 
-	// Give requests already in progress a few seconds to finish.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
 	log.Info("stopped")
 }
 
+// envOr returns the environment variable key, or fallback if it is unset.
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
