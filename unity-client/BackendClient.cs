@@ -1,8 +1,5 @@
-// Copy this file into the Unity project (for example Assets/_Game/Net/).
-// It should stay the only place in the game that knows the backend's URLs and JSON.
-//
-// This file is plumbing: sending a request and reading the reply.
-// Add one method per endpoint as you build them, following Ping() below.
+// Calls the Go backend from Unity. Copy into Assets/Scripts/Architecture/.
+// This is the only file in the game that knows the backend's URLs and JSON.
 using System;
 using System.Text;
 using System.Threading.Tasks;
@@ -11,14 +8,58 @@ using UnityEngine.Networking;
 
 namespace Game.Backend
 {
-    // ---- Data shapes ----
-    // One [Serializable] class per request or reply. Unity's JsonUtility matches
-    // public field names to JSON keys exactly, so name them as the server does.
+    // JsonUtility matches public field names to JSON keys exactly,
+    // so these are named as the server names them.
 
     [Serializable]
     public class HealthReply
     {
         public string status;
+    }
+
+    [Serializable]
+    public class CreatePlayerRequest
+    {
+        public string display_name;
+    }
+
+    [Serializable]
+    public class PlayerReply
+    {
+        public long id;
+        public string display_name;
+        public string created_at;
+    }
+
+    [Serializable]
+    public class CreateRoomRequest
+    {
+        public long host_player_id;
+        public string relay_join_code;
+        public int max_players;
+    }
+
+    [Serializable]
+    public class RoomReply
+    {
+        public long id;
+        public string code;
+        public long host_player_id;
+        public string status;
+    }
+
+    [Serializable]
+    public class RoomPlayerRequest
+    {
+        public long player_id;
+    }
+
+    [Serializable]
+    public class JoinRoomReply
+    {
+        public string code;
+        public string relay_join_code;
+        public long host_player_id;
     }
 
     [Serializable]
@@ -28,11 +69,12 @@ namespace Game.Backend
         public string message;
     }
 
-    /// <summary>Thrown when a call fails. Check Code to decide what to show the player.</summary>
+    // Thrown when a call fails. Code is the server's error code
+    // (for example "room_full"), or "unreachable" if there was no answer.
     public class BackendException : Exception
     {
-        public readonly long Status; // HTTP status, or 0 if the server could not be reached
-        public readonly string Code; // the server's error code, or "unreachable"
+        public readonly long Status;
+        public readonly string Code;
 
         public BackendException(long status, string code, string message) : base(message)
         {
@@ -45,34 +87,68 @@ namespace Game.Backend
     {
         readonly string baseUrl;
 
+        // BackendClient talks to the server at baseUrl, e.g. "http://localhost:8080".
         public BackendClient(string baseUrl)
         {
             this.baseUrl = baseUrl.TrimEnd('/');
         }
 
-        /// <summary>Asks the server if it is alive. The reply's status is "ok".</summary>
+        // Ping checks the server and its database are up.
         public Task<HealthReply> Ping()
         {
             return Send<HealthReply>("GET", "/healthz", null);
         }
 
-        // TODO: your endpoints. For example:
-        //
-        //   public Task<RoomInfo> CreateRoom(CreateRoomRequest request)
-        //   {
-        //       return Send<RoomInfo>("POST", "/rooms", request);
-        //   }
+        // CreatePlayer adds a player; save the reply's id and reuse it.
+        public Task<PlayerReply> CreatePlayer(string displayName)
+        {
+            return Send<PlayerReply>("POST", "/players", new CreatePlayerRequest { display_name = displayName });
+        }
 
-        /// <summary>
-        /// Sends one request and returns the reply, read from JSON into T.
-        /// body is sent as JSON; pass null for requests without one.
-        /// </summary>
+        // GetPlayer looks up one player by id.
+        public Task<PlayerReply> GetPlayer(long playerId)
+        {
+            return Send<PlayerReply>("GET", "/players/" + playerId, null);
+        }
+
+        // CreateRoom opens a room for a Relay game the host already started,
+        // and returns the room code to show other players.
+        public Task<RoomReply> CreateRoom(long hostPlayerId, string relayJoinCode, int maxPlayers)
+        {
+            return Send<RoomReply>("POST", "/rooms", new CreateRoomRequest
+            {
+                host_player_id = hostPlayerId,
+                relay_join_code = relayJoinCode,
+                max_players = maxPlayers,
+            });
+        }
+
+        // JoinRoom adds a player to a room and returns the Relay code to connect with.
+        public Task<JoinRoomReply> JoinRoom(string roomCode, long playerId)
+        {
+            return Send<JoinRoomReply>("POST", RoomPath(roomCode) + "/join", new RoomPlayerRequest { player_id = playerId });
+        }
+
+        // LeaveRoom tells the server a player left. If the host leaves, the room closes.
+        public Task LeaveRoom(string roomCode, long playerId)
+        {
+            return Send<object>("POST", RoomPath(roomCode) + "/leave", new RoomPlayerRequest { player_id = playerId });
+        }
+
+        // RoomPath builds /rooms/{code}, cleaning up however the player typed the code.
+        static string RoomPath(string roomCode)
+        {
+            return "/rooms/" + Uri.EscapeDataString((roomCode ?? "").Trim().ToUpperInvariant());
+        }
+
+        // Send makes one request, with body as JSON if not null, and reads the reply into T.
+        // It throws BackendException on an error reply or no reply.
         async Task<T> Send<T>(string method, string path, object body)
         {
             using (var request = new UnityWebRequest(baseUrl + path, method))
             {
                 request.downloadHandler = new DownloadHandlerBuffer();
-                request.timeout = 8; // seconds; never leave a menu hanging on a dead server
+                request.timeout = 8; // seconds
 
                 if (body != null)
                 {
@@ -81,8 +157,7 @@ namespace Game.Backend
                     request.SetRequestHeader("Content-Type", "application/json");
                 }
 
-                // Wait for the request without blocking the game. Called from the main
-                // thread, this resumes on the main thread, so it is safe to touch UI after it.
+                // Resumes on the main thread, so callers can touch UI afterwards.
                 var finished = new TaskCompletionSource<bool>();
                 request.SendWebRequest().completed += _ => finished.SetResult(true);
                 await finished.Task;
@@ -91,10 +166,10 @@ namespace Game.Backend
 
                 if (request.result == UnityWebRequest.Result.Success)
                 {
-                    return JsonUtility.FromJson<T>(text);
+                    // 204 replies (like LeaveRoom) have no body.
+                    return string.IsNullOrEmpty(text) ? default : JsonUtility.FromJson<T>(text);
                 }
 
-                // The server answered with an error: read its code and message.
                 if (request.result == UnityWebRequest.Result.ProtocolError)
                 {
                     var error = new BackendError();
@@ -104,7 +179,6 @@ namespace Game.Backend
                         string.IsNullOrEmpty(error.message) ? request.error : error.message);
                 }
 
-                // No answer at all: server down, no internet, or timed out.
                 throw new BackendException(0, "unreachable", request.error);
             }
         }

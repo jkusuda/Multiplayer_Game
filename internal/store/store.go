@@ -1,13 +1,5 @@
 // Package store is the only code that talks to Postgres.
-// Handlers in internal/api call methods on Store and never write SQL themselves.
-//
-// This file is plumbing: connecting and running migrations.
-// Your queries go in new files in this folder, as methods on Store. For example:
-//
-//	func (s *Store) CreateRoom(ctx context.Context, ...) (Room, error) {
-//		row := s.db.QueryRowContext(ctx, `INSERT INTO rooms ... RETURNING code`, ...)
-//		...
-//	}
+// This file holds connecting and running migrations.
 package store
 
 import (
@@ -45,16 +37,18 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 	return s, nil
 }
 
+// Close closes the database connections.
 func (s *Store) Close() error { return s.db.Close() }
 
+// Ping checks the database is reachable.
 func (s *Store) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
 
-// migrationLock is an arbitrary number. Every copy of the server takes the
-// same Postgres advisory lock, so two copies starting together cannot both
-// run the same migration.
+// migrationLock is an arbitrary advisory lock id, so two servers starting at
+// once cannot run the same migration twice.
 const migrationLock = 741100
 
-// Migrate runs every .sql file in the migrations folder that has not run yet.
+// Migrate runs every migrations/*.sql file that has not run yet, in name order,
+// and records each one in schema_migrations.
 func (s *Store) Migrate(ctx context.Context) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {

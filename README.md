@@ -1,66 +1,44 @@
 # Multiplayer Game Backend
 
-A Go server for everything outside a match: rooms, run results, the leaderboard.
-Live gameplay does not go through this server. Players sync with each other inside Unity.
+Go server for the lobby: players and rooms. Gameplay itself runs through Unity Relay, not this server.
 
-## Run it
+## Run
 
-You need [Go 1.22 or newer](https://go.dev/dl/) and [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+Needs [Go 1.22+](https://go.dev/dl/) and [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 
 ```
 docker compose up -d --wait     # start Postgres
-go run ./cmd/server             # start the server on http://localhost:8080
-```
-
-Check it is alive:
-
-```
+go run ./cmd/server             # serve on http://localhost:8080
 curl http://localhost:8080/healthz
 ```
 
-## Tests
+## Docker
 
-Tests run against the real database, each in its own temporary schema.
-
-Mac or Linux:
+The image is what gets deployed. The host sets `PORT` and `DATABASE_URL`.
 
 ```
-make test
+docker build -t game-backend .
+docker run -p 8080:8080 -e DATABASE_URL="postgres://..." game-backend
 ```
 
-Windows PowerShell:
+## Layout
 
 ```
-docker compose up -d --wait
-$env:TEST_DATABASE_URL = "postgres://game:game@localhost:5432/game?sslmode=disable"
-go test ./...
+cmd/server/       starts the server
+internal/api/     HTTP handlers
+internal/store/   SQL queries
+migrations/       numbered .sql files, run once each on startup
+unity-client/     C# client to copy into Unity
 ```
 
-## Where things live
+## Endpoints
 
-```
-cmd/server/main.go      starts the server (finished)
-internal/api/           HTTP handlers: read JSON, check it, call the store, write JSON
-internal/store/         every SQL query
-migrations/             numbered .sql files that build the database
-unity-client/           C# files to copy into the Unity project
-```
+Errors always look like `{"error": "short_code", "message": "..."}`.
 
-## What to build
-
-| The game needs to | Called by | When |
-| --- | --- | --- |
-| Open a room and get a short code to share | Host | Before a run |
-| Join a room by its code and learn how to reach the host | Other players | Before a run |
-| Save a finished run: time survived, score, crew | Host | After a run |
-| Read the leaderboard | Everyone | Menu and end screen |
-| Read a player's badges | Everyone | Menu |
-
-## Adding an endpoint
-
-1. Decide the request and reply JSON, and write them down in this README.
-2. If it needs new tables, add a migration (see `migrations/0000_how_migrations_work.sql`).
-3. Add a method on `Store` in `internal/store` with the SQL.
-4. Add a handler in `internal/api` and register its route in `api.go`.
-5. Add a test in `internal/api/api_test.go`.
-6. Add the matching method to `unity-client/BackendClient.cs`.
+| Endpoint | Request | Reply | Errors |
+| --- | --- | --- | --- |
+| `POST /players` | `{display_name}` | `201 {id, display_name, created_at}` | `400 invalid_display_name` |
+| `GET /players/{id}` | | `200 {id, display_name, created_at}` | `400 invalid_player_id`, `404 player_not_found` |
+| `POST /rooms` | `{host_player_id}` | `201 {id, code, host_player_id, status}` | `400 invalid_host_player_id`, `404 player_not_found` |
+| `POST /rooms/{code}/join` *(not built)* | `{player_id}` | `200 {code, relay_join_code, host_player_id}` | `400 invalid_player_id`, `404 room_not_found`, `404 player_not_found`, `409 room_closed`, `409 room_full` |
+| `POST /rooms/{code}/leave` *(not built)* | `{player_id}` | `204` | `400 invalid_player_id`, `404 room_not_found` |
