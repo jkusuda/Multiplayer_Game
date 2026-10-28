@@ -1,0 +1,3 @@
+ALTER TABLE rooms ADD COLUMN relay_join_code VARCHAR(10);
+
+ALTER TABLE rooms ADD COLUMN max_players INT NOT NULL DEFAULT 6;
