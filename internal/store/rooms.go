@@ -54,13 +54,19 @@ func generateRoomCode() (string, error) {
 // It returns ErrHostNotFound if hostPlayerID is not a player.
 func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCode string, maxPlayers int64) (Room, error) {
 	for attempt := 0; attempt < maxRoomCodeAttempts; attempt++ {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return Room{}, fmt.Errorf("begin create room transaction: %w", err)
+		}
+		defer tx.Rollback()
+
 		code, err := generateRoomCode()
 		if err != nil {
 			return Room{}, fmt.Errorf("generate room code: %w", err)
 		}
 
 		var room Room
-		err = s.db.QueryRowContext(ctx, `
+		err = tx.QueryRowContext(ctx, `
 			INSERT INTO rooms (code, host_player_id, created_at, room_status, relay_join_code, max_players)
 			VALUES ($1, $2, now(), 'waiting', $3, $4)
 			RETURNING id, code, host_player_id, created_at, room_status, relay_join_code, max_players
@@ -71,24 +77,33 @@ func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCod
 			&room.Status,
 			&room.RelayJoinCode,
 			&room.MaxPlayers)
-		if err == nil {
-			_, err = s.db.ExecContext(ctx, `
-					INSERT INTO room_players (room_id, player_id, joined_at, left_at)
-					VALUES ($1, $2, now(), NULL)
-				`, room.ID, hostPlayerID)
-			return room, nil
-		}
-
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) {
-			switch {
-			case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
-				continue
-			case pqErr.Code == pqerror.ForeignKeyViolation:
-				return Room{}, ErrHostNotFound
+		if err != nil {
+			var pqErr *pq.Error
+			if errors.As(err, &pqErr) {
+				switch {
+				case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
+					continue
+				case pqErr.Code == pqerror.ForeignKeyViolation:
+					return Room{}, ErrHostNotFound
+				}
+			}
+			if err != nil {
+				return Room{}, fmt.Errorf("insert room: %w", err)
 			}
 		}
-		return Room{}, fmt.Errorf("insert room: %w", err)
+
+		_, err = tx.ExecContext(ctx, `
+				INSERT INTO room_players (room_id, player_id, joined_at, left_at)
+				VALUES ($1, $2, now(), NULL)
+			`, room.ID, hostPlayerID)
+		if err != nil {
+			return Room{}, fmt.Errorf("insert room: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return Room{}, fmt.Errorf("commit create room transaction: %w", err)
+		}
+		return room, nil
 	}
 	return Room{}, ErrRoomCodeExhausted
 }
