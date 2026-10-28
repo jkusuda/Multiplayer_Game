@@ -14,7 +14,9 @@ import (
 // TODO(Helen): add RelayJoinCode `json:"relay_join_code"` and MaxPlayers
 // `json:"max_players"`, check them in createRoom, and pass them to the store.
 type createRoomRequest struct {
-	HostPlayerID int64 `json:"host_player_id"`
+	HostPlayerID  int64  `json:"host_player_id"`
+	RelayJoinCode string `json:"relay_join_code"`
+	MaxPlayers    int64  `json:"max_players"`
 }
 
 type roomResponse struct {
@@ -55,7 +57,7 @@ func (a *API) createRoom(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
 	defer cancel()
 
-	room, err := a.store.CreateRoom(ctx, req.HostPlayerID)
+	room, err := a.store.CreateRoom(ctx, req.HostPlayerID, req.RelayJoinCode, req.MaxPlayers)
 	if errors.Is(err, store.ErrHostNotFound) {
 		writeError(w, http.StatusNotFound, "player_not_found", "no player has that host_player_id")
 		return
@@ -66,17 +68,17 @@ func (a *API) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusCreated, roomResponse{
-		ID:           room.ID,
-		Code:         room.Code,
-		HostPlayerID: room.HostPlayerID,
-		Status:       room.Status,
+		ID:            room.ID,
+		Code:          room.Code,
+		HostPlayerID:  room.HostPlayerID,
+		Status:        room.Status,
+		RelayJoinCode: room.RelayJoinCode,
+		MaxPlayers:    room.MaxPlayers,
 	})
 }
 
 // joinRoom handles POST /rooms/{code}/join: adds a player and replies with
 // the relay join code Unity needs to connect to the host.
-//
-// TODO - Helen :D
 func (a *API) joinRoom(w http.ResponseWriter, r *http.Request) {
 	var req joinRoomRequest
 	if !readJSON(w, r, &req) {

@@ -15,17 +15,12 @@ import (
 )
 
 type Room struct {
-	ID           int64
-	Code         string
-	HostPlayerID int64
-	Status       string // "waiting" or "closed"
-
-	// TODO - Helen: add migrations/0002_room_relay_code.sql with
-	//   ALTER TABLE rooms ADD COLUMN relay_join_code VARCHAR(10);
-	//   ALTER TABLE rooms ADD COLUMN max_players INT NOT NULL DEFAULT 4;
-	// then read and write these two fields in the queries below.
+	ID            int64
+	Code          string
+	HostPlayerID  int64
+	Status        string // "waiting" or "closed"
 	RelayJoinCode string
-	MaxPlayers    int
+	MaxPlayers    int64
 }
 
 var (
@@ -57,10 +52,6 @@ func generateRoomCode() (string, error) {
 
 // CreateRoom opens a room under a new code, retrying if the code is taken.
 // It returns ErrHostNotFound if hostPlayerID is not a player.
-//
-// TODO - Helen :D
-// take relayJoinCode and maxPlayers too, save them in the INSERT,
-// and add the host to room_players in the same transaction.
 func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCode string, maxPlayers int64) (Room, error) {
 	for attempt := 0; attempt < maxRoomCodeAttempts; attempt++ {
 		code, err := generateRoomCode()
@@ -81,6 +72,10 @@ func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCod
 			&room.RelayJoinCode,
 			&room.MaxPlayers)
 		if err == nil {
+			_, err = s.db.ExecContext(ctx, `
+					INSERT INTO room_players (room_id, player_id, joined_at, left_at)
+					VALUES ($1, $2, now(), NULL)
+				`, room.ID, hostPlayerID)
 			return room, nil
 		}
 
@@ -100,8 +95,6 @@ func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCod
 
 // JoinRoom adds playerID to the room with this code and returns the room,
 // so the caller gets its relay join code.
-//
-// TODO - Helen :D
 func (s *Store) JoinRoom(ctx context.Context, code string, playerID int64) (Room, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -153,7 +146,7 @@ func (s *Store) JoinRoom(ctx context.Context, code string, playerID int64) (Room
 		return room, nil
 	}
 
-	var n int
+	var n int64
 	err = tx.QueryRowContext(ctx, `
 		SELECT count(*)
 		FROM room_players
