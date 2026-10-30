@@ -41,4 +41,4 @@ Errors always look like `{"error": "short_code", "message": "..."}`.
 | `GET /players/{id}` | | `200 {id, display_name, created_at}` | `400 invalid_player_id`, `404 player_not_found` |
 | `POST /rooms` | `{host_player_id, relay_join_code, max_players}` | `201 {id, code, host_player_id, status, relay_join_code, max_players}` | `400 invalid_host_player_id`, `404 player_not_found` |
 | `POST /rooms/{code}/join` | `{player_id}` | `200 {code, relay_join_code, host_player_id}` | `400 invalid_player_id`, `404 room_not_found`, `404 player_not_found`, `409 room_closed`, `409 room_full` |
-| `POST /rooms/{code}/leave` *(not built)* | `{player_id}` | `204` | `400 invalid_player_id`, `404 room_not_found` |
+| `POST /rooms/{code}/leave` | `{player_id}` | `204` | `400 invalid_player_id`,  `404 player_not_found`, `404 room_not_found` |

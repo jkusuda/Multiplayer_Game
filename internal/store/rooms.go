@@ -198,8 +198,60 @@ func (s *Store) JoinRoom(ctx context.Context, code string, playerID int64) (Room
 
 // LeaveRoom marks playerID as gone from the room with this code. If the host
 // leaves, the room closes, because its Relay game ends with the host.
-//
-// TODO - Helen :D
 func (s *Store) LeaveRoom(ctx context.Context, code string, playerID int64) error {
-	return errNotImplemented
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin leave transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var hostID int64
+	var roomID int64
+	err = tx.QueryRowContext(ctx, `
+			SELECT id, host_player_id
+			FROM rooms
+			WHERE code = $1
+			FOR UPDATE
+		`, code).Scan(
+		&roomID, &hostID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrRoomNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("find room: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+			UPDATE room_players
+			SET left_at = now()
+			WHERE room_id = $1
+				AND player_id = $2
+				AND left_at IS NULL
+			`, roomID, playerID)
+	if err != nil {
+		return fmt.Errorf("leave room: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check room membership: %w", err)
+	}
+	if affected == 0 {
+		return ErrPlayerNotFound
+	}
+
+	if hostID == playerID {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE rooms
+			SET room_status = 'closed'
+			WHERE id = $1
+		`, roomID)
+	}
+	if err != nil {
+		return fmt.Errorf("update room to closed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit leave transaction: %w", err)
+	}
+	return nil
 }

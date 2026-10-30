@@ -130,8 +130,36 @@ func (a *API) joinRoom(w http.ResponseWriter, r *http.Request) {
 }
 
 // leaveRoom handles POST /rooms/{code}/leave: marks a player as gone.
-//
-// TODO - Helen :D
 func (a *API) leaveRoom(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "POST /rooms/{code}/leave is not built yet")
+	code := r.PathValue("code")
+	var req leaveRoomRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	if req.PlayerID <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid_player_id", "player_id must be positive")
+		return
+	}
+	if !roomCodePattern.MatchString(code) {
+		writeError(w, http.StatusBadRequest, "invalid_code", "room code must be 5 capital letters")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	err := a.store.LeaveRoom(ctx, code, req.PlayerID)
+	if errors.Is(err, store.ErrRoomNotFound) {
+		writeError(w, http.StatusNotFound, "room_not_found", "no room has that code")
+		return
+	}
+	if errors.Is(err, store.ErrPlayerNotFound) {
+		writeError(w, http.StatusNotFound, "player_not_found", "no player has that id")
+		return
+	}
+	if err != nil {
+		a.serverError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
