@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math/big"
@@ -14,17 +15,12 @@ import (
 )
 
 type Room struct {
-	ID           int64
-	Code         string
-	HostPlayerID int64
-	Status       string // "waiting" or "closed"
-
-	// TODO - Helen: add migrations/0002_room_relay_code.sql with
-	//   ALTER TABLE rooms ADD COLUMN relay_join_code VARCHAR(10);
-	//   ALTER TABLE rooms ADD COLUMN max_players INT NOT NULL DEFAULT 4;
-	// then read and write these two fields in the queries below.
+	ID            int64
+	Code          string
+	HostPlayerID  int64
+	Status        string // "waiting" or "closed"
 	RelayJoinCode string
-	MaxPlayers    int
+	MaxPlayers    int64
 }
 
 var (
@@ -56,53 +52,206 @@ func generateRoomCode() (string, error) {
 
 // CreateRoom opens a room under a new code, retrying if the code is taken.
 // It returns ErrHostNotFound if hostPlayerID is not a player.
-//
-// TODO - Helen :D
-// take relayJoinCode and maxPlayers too, save them in the INSERT,
-// and add the host to room_players in the same transaction.
-func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64) (Room, error) {
+func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCode string, maxPlayers int64) (Room, error) {
 	for attempt := 0; attempt < maxRoomCodeAttempts; attempt++ {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return Room{}, fmt.Errorf("begin create room transaction: %w", err)
+		}
+		defer tx.Rollback()
+
 		code, err := generateRoomCode()
 		if err != nil {
 			return Room{}, fmt.Errorf("generate room code: %w", err)
 		}
 
 		var room Room
-		err = s.db.QueryRowContext(ctx, `
-			INSERT INTO rooms (code, host_player_id, room_status, created_at)
-			VALUES ($1, $2, 'waiting', now())
-			RETURNING id, code, host_player_id, room_status
-		`, code, hostPlayerID).Scan(&room.ID, &room.Code, &room.HostPlayerID, &room.Status)
-		if err == nil {
-			return room, nil
-		}
-
-		var pqErr *pq.Error
-		if errors.As(err, &pqErr) {
-			switch {
-			case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
-				continue
-			case pqErr.Code == pqerror.ForeignKeyViolation:
-				return Room{}, ErrHostNotFound
+		err = tx.QueryRowContext(ctx, `
+			INSERT INTO rooms (code, host_player_id, created_at, room_status, relay_join_code, max_players)
+			VALUES ($1, $2, now(), 'waiting', $3, $4)
+			RETURNING id, code, host_player_id, created_at, room_status, relay_join_code, max_players
+		`, code, hostPlayerID, relayJoinCode, maxPlayers).Scan(
+			&room.ID,
+			&room.Code,
+			&room.HostPlayerID,
+			&room.Status,
+			&room.RelayJoinCode,
+			&room.MaxPlayers)
+		if err != nil {
+			var pqErr *pq.Error
+			if errors.As(err, &pqErr) {
+				switch {
+				case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
+					continue
+				case pqErr.Code == pqerror.ForeignKeyViolation:
+					return Room{}, ErrHostNotFound
+				}
+			}
+			if err != nil {
+				return Room{}, fmt.Errorf("insert room: %w", err)
 			}
 		}
-		return Room{}, fmt.Errorf("insert room: %w", err)
+
+		_, err = tx.ExecContext(ctx, `
+				INSERT INTO room_players (room_id, player_id, joined_at, left_at)
+				VALUES ($1, $2, now(), NULL)
+			`, room.ID, hostPlayerID)
+		if err != nil {
+			return Room{}, fmt.Errorf("insert room: %w", err)
+		}
+
+		if err := tx.Commit(); err != nil {
+			return Room{}, fmt.Errorf("commit create room transaction: %w", err)
+		}
+		return room, nil
 	}
 	return Room{}, ErrRoomCodeExhausted
 }
 
 // JoinRoom adds playerID to the room with this code and returns the room,
 // so the caller gets its relay join code.
-//
-// TODO - Helen :D
 func (s *Store) JoinRoom(ctx context.Context, code string, playerID int64) (Room, error) {
-	return Room{}, errNotImplemented
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Room{}, fmt.Errorf("begin join transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var room Room
+	err = tx.QueryRowContext(ctx, `
+			SELECT id, code, host_player_id, room_status, relay_join_code, max_players
+			FROM rooms
+			WHERE code = $1
+			FOR UPDATE
+		`, code).Scan(
+		&room.ID,
+		&room.Code,
+		&room.HostPlayerID,
+		&room.Status,
+		&room.RelayJoinCode,
+		&room.MaxPlayers)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Room{}, ErrRoomNotFound
+	}
+	if err != nil {
+		return Room{}, fmt.Errorf("find room: %w", err)
+	}
+	if room.Status == "closed" {
+		return Room{}, ErrRoomClosed
+	}
+
+	var alreadyJoined bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1
+			FROM room_players
+			WHERE room_id = $1
+			AND player_id = $2
+			AND left_at IS NULL
+		)
+	`, room.ID, playerID).Scan(&alreadyJoined)
+	if err != nil {
+		return Room{}, fmt.Errorf("check room membership: %w", err)
+	}
+
+	if alreadyJoined {
+		if err := tx.Commit(); err != nil {
+			return Room{}, fmt.Errorf("commit existing membership: %w", err)
+		}
+		return room, nil
+	}
+
+	var n int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT count(*)
+		FROM room_players
+		WHERE room_id = $1 
+			AND left_at IS NULL
+		`, room.ID).Scan(&n)
+	if err != nil {
+		return Room{}, fmt.Errorf("count room players: %w", err)
+	}
+	if n >= room.MaxPlayers {
+		return Room{}, ErrRoomFull
+	}
+
+	_, err = tx.ExecContext(ctx, `
+			INSERT INTO room_players (room_id, player_id, joined_at, left_at)
+			VALUES ($1, $2, now(), NULL)
+		`, room.ID, playerID)
+	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) &&
+			pqErr.Code == pqerror.ForeignKeyViolation &&
+			pqErr.Constraint == "room_players_player_id_fkey" {
+			return Room{}, ErrPlayerNotFound
+		}
+		return Room{}, fmt.Errorf("insert player: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Room{}, fmt.Errorf("commit join transaction: %w", err)
+	}
+
+	return room, nil
 }
 
 // LeaveRoom marks playerID as gone from the room with this code. If the host
 // leaves, the room closes, because its Relay game ends with the host.
-//
-// TODO - Helen :D
 func (s *Store) LeaveRoom(ctx context.Context, code string, playerID int64) error {
-	return errNotImplemented
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin leave transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var hostID int64
+	var roomID int64
+	err = tx.QueryRowContext(ctx, `
+			SELECT id, host_player_id
+			FROM rooms
+			WHERE code = $1
+			FOR UPDATE
+		`, code).Scan(
+		&roomID, &hostID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrRoomNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("find room: %w", err)
+	}
+
+	result, err := tx.ExecContext(ctx, `
+			UPDATE room_players
+			SET left_at = now()
+			WHERE room_id = $1
+				AND player_id = $2
+				AND left_at IS NULL
+			`, roomID, playerID)
+	if err != nil {
+		return fmt.Errorf("leave room: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check room membership: %w", err)
+	}
+	if affected == 0 {
+		return ErrPlayerNotFound
+	}
+
+	if hostID == playerID {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE rooms
+			SET room_status = 'closed'
+			WHERE id = $1
+		`, roomID)
+	}
+	if err != nil {
+		return fmt.Errorf("update room to closed: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit leave transaction: %w", err)
+	}
+	return nil
 }
