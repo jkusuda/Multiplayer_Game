@@ -46,6 +46,8 @@ namespace Game.Backend
         public string code;
         public long host_player_id;
         public string status;
+        public string relay_join_code;
+        public int max_players;
     }
 
     [Serializable]

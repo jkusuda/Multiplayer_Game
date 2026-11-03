@@ -12,6 +12,8 @@ import (
 	"backend/internal/store"
 )
 
+const maxRelayJoinCodeLength = 10 // matches rooms.relay_join_code VARCHAR(10)
+
 type createRoomRequest struct {
 	HostPlayerID  int64  `json:"host_player_id"`
 	RelayJoinCode string `json:"relay_join_code"`
@@ -55,6 +57,10 @@ func (a *API) createRoom(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.MaxPlayers < 4 || req.MaxPlayers > 8 {
 		writeError(w, http.StatusBadRequest, "invalid_max_players", "max_players must be between 4-8")
+		return
+	}
+	if req.RelayJoinCode == "" || len(req.RelayJoinCode) > maxRelayJoinCodeLength {
+		writeError(w, http.StatusBadRequest, "invalid_relay_join_code", "relay_join_code must be 1 to 10 characters")
 		return
 	}
 

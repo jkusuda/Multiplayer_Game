@@ -29,6 +29,7 @@ var (
 	ErrRoomNotFound      = errors.New("no room has that code")
 	ErrRoomClosed        = errors.New("room is closed")
 	ErrRoomFull          = errors.New("room is full")
+	errRoomCodeTaken     = errors.New("room code is taken")
 	errNotImplemented    = errors.New("not implemented")
 )
 
@@ -54,58 +55,66 @@ func generateRoomCode() (string, error) {
 // It returns ErrHostNotFound if hostPlayerID is not a player.
 func (s *Store) CreateRoom(ctx context.Context, hostPlayerID int64, relayJoinCode string, maxPlayers int64) (Room, error) {
 	for attempt := 0; attempt < maxRoomCodeAttempts; attempt++ {
-		tx, err := s.db.BeginTx(ctx, nil)
-		if err != nil {
-			return Room{}, fmt.Errorf("begin create room transaction: %w", err)
-		}
-		defer tx.Rollback()
-
 		code, err := generateRoomCode()
 		if err != nil {
 			return Room{}, fmt.Errorf("generate room code: %w", err)
 		}
 
-		var room Room
-		err = tx.QueryRowContext(ctx, `
-			INSERT INTO rooms (code, host_player_id, created_at, room_status, relay_join_code, max_players)
-			VALUES ($1, $2, now(), 'waiting', $3, $4)
-			RETURNING id, code, host_player_id, created_at, room_status, relay_join_code, max_players
-		`, code, hostPlayerID, relayJoinCode, maxPlayers).Scan(
-			&room.ID,
-			&room.Code,
-			&room.HostPlayerID,
-			&room.Status,
-			&room.RelayJoinCode,
-			&room.MaxPlayers)
-		if err != nil {
-			var pqErr *pq.Error
-			if errors.As(err, &pqErr) {
-				switch {
-				case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
-					continue
-				case pqErr.Code == pqerror.ForeignKeyViolation:
-					return Room{}, ErrHostNotFound
-				}
-			}
-			if err != nil {
-				return Room{}, fmt.Errorf("insert room: %w", err)
-			}
+		room, err := s.insertRoom(ctx, code, hostPlayerID, relayJoinCode, maxPlayers)
+		if errors.Is(err, errRoomCodeTaken) {
+			continue
 		}
-
-		_, err = tx.ExecContext(ctx, `
-				INSERT INTO room_players (room_id, player_id, joined_at, left_at)
-				VALUES ($1, $2, now(), NULL)
-			`, room.ID, hostPlayerID)
-		if err != nil {
-			return Room{}, fmt.Errorf("insert room: %w", err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return Room{}, fmt.Errorf("commit create room transaction: %w", err)
-		}
-		return room, nil
+		return room, err
 	}
 	return Room{}, ErrRoomCodeExhausted
+}
+
+// insertRoom adds the room and its host in one transaction. It returns
+// errRoomCodeTaken if another room already has this code.
+func (s *Store) insertRoom(ctx context.Context, code string, hostPlayerID int64, relayJoinCode string, maxPlayers int64) (Room, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Room{}, fmt.Errorf("begin create room transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	var room Room
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO rooms (code, host_player_id, created_at, room_status, relay_join_code, max_players)
+		VALUES ($1, $2, now(), 'waiting', $3, $4)
+		RETURNING id, code, host_player_id, room_status, relay_join_code, max_players
+	`, code, hostPlayerID, relayJoinCode, maxPlayers).Scan(
+		&room.ID,
+		&room.Code,
+		&room.HostPlayerID,
+		&room.Status,
+		&room.RelayJoinCode,
+		&room.MaxPlayers)
+	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) {
+			switch {
+			case pqErr.Code == pqerror.UniqueViolation && pqErr.Constraint == "rooms_code_key":
+				return Room{}, errRoomCodeTaken
+			case pqErr.Code == pqerror.ForeignKeyViolation:
+				return Room{}, ErrHostNotFound
+			}
+		}
+		return Room{}, fmt.Errorf("insert room: %w", err)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO room_players (room_id, player_id, joined_at, left_at)
+		VALUES ($1, $2, now(), NULL)
+	`, room.ID, hostPlayerID)
+	if err != nil {
+		return Room{}, fmt.Errorf("insert room host: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return Room{}, fmt.Errorf("commit create room transaction: %w", err)
+	}
+	return room, nil
 }
 
 // JoinRoom adds playerID to the room with this code and returns the room,
@@ -178,6 +187,8 @@ func (s *Store) JoinRoom(ctx context.Context, code string, playerID int64) (Room
 	_, err = tx.ExecContext(ctx, `
 			INSERT INTO room_players (room_id, player_id, joined_at, left_at)
 			VALUES ($1, $2, now(), NULL)
+			ON CONFLICT (room_id, player_id)
+			DO UPDATE SET joined_at = now(), left_at = NULL
 		`, room.ID, playerID)
 	if err != nil {
 		var pqErr *pq.Error
