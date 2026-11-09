@@ -2,6 +2,7 @@
 services:
   db:
     image: postgres:16
+    restart: unless-stopped
     environment:
       POSTGRES_USER: game
       POSTGRES_PASSWORD: game
@@ -15,6 +16,17 @@ services:
       interval: 2s
       timeout: 3s
       retries: 20
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://game:game@db:5432/game?sslmode=disable
+    depends_on:
+      db:
+        condition: service_healthy
+    ports: 
+      - "8080:8080"
+    mem_limit: 512m
 
 volumes:
   dbdata:
