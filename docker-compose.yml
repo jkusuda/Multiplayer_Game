@@ -19,6 +19,8 @@ services:
   app:
     build: .
     restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://game:game@db:5432/game?sslmode=disable
     depends_on:
       db:
         condition: service_healthy
